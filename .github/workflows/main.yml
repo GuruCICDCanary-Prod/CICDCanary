@@ -1,0 +1,74 @@
+name: CanaryTest
+
+on:
+  pull_request:
+    branches: [ main ]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials ECR
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ always() }}
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: ECR Login
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          registries: ${{ secrets.REGISTRY_ACCOUNT_ID }}
+
+      - name: Docker Pull
+        run: |
+          docker pull ${{ secrets.ECR_URI }}
+          docker image tag ${{ secrets.ECR_URI }} codeguru:latest
+
+      - name: Configure AWS Credentials CodeGuru
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ always() }}
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: Checkout the CodeGuru Reviewer Action repository
+        uses: actions/checkout@v2
+        if: ${{ always() }}
+        with:
+          repository: GuruCICDCanary-Prod/CICD-Actions
+          ref: refs/heads/main
+          token: ${{ secrets.TOKEN }}
+          path: ./.github/GuruCICDCanary-Prod/CICD-Actions
+
+      - name: AWS CodeGuru Reviewer Scanner
+        uses: ./.github/GuruCICDCanary-Prod/CICD-Actions
+        if: ${{ always() }}
+        with:
+          name: cicd-canary-prod-eu-central-1-1680030679952
+          build_path: buildFiles
+          s3_bucket: codeguru-reviewer-github-canary-prod-eu-central-1
+
+      - name: Upload review result
+        if: ${{ always() }}
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: codeguru-results.sarif.json
+
+      # Add this step to assist debugging
+      - name: 'Upload Artifact'
+        uses: actions/upload-artifact@v2
+        with:
+          name: sarif_results
+          path: codeguru-results*.json
