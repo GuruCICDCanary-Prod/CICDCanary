@@ -1,0 +1,93 @@
+name: CanaryTest
+
+on:
+  pull_request:
+    branches: [ main ]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # V2215149799: actions/checkout@v4 on current GitHub runners packs all
+      # refs into .git/packed-refs and leaves .git/refs/ empty. The
+      # aws-actions/codeguru-reviewer archiver omits empty directories, so
+      # source.zip lands in S3 without a .git/refs/ directory at all. Both git
+      # and JGit then reject the unzipped tree as "not a git repository", and
+      # CGR's cloner exits 12 -> CodeReview.State=Failed across every region.
+      - name: Ensure .git/refs/ exists in source.zip (CGR cloner requires it)
+        shell: bash
+        run: |
+          mkdir -p .git/refs/heads .git/refs/tags .git/refs/remotes/origin
+          if [ -f .git/packed-refs ]; then
+            grep -v '^#' .git/packed-refs | grep -v '^\^' | while read sha ref; do
+              [ -z "$sha" ] || [ -z "$ref" ] && continue
+              mkdir -p "$(dirname ".git/$ref")"
+              printf '%s\n' "$sha" > ".git/$ref"
+            done
+          fi
+          echo "Loose refs written: $(find .git/refs -type f 2>/dev/null | wc -l)"
+
+      - name: Configure AWS Credentials ECR
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ always() }}
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: ECR Login
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          registries: ${{ secrets.REGISTRY_ACCOUNT_ID }}
+
+      - name: Docker Pull
+        run: |
+          docker pull ${{ secrets.ECR_URI }}
+          docker image tag ${{ secrets.ECR_URI }} codeguru:latest
+
+      - name: Configure AWS Credentials CodeGuru
+        uses: aws-actions/configure-aws-credentials@v1
+        if: ${{ always() }}
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+
+      - name: Checkout the CodeGuru Reviewer Action repository
+        uses: actions/checkout@v4
+        if: ${{ always() }}
+        with:
+          repository: GuruCICDCanary-Prod/CICD-Actions
+          ref: refs/heads/main
+          token: ${{ secrets.TOKEN }}
+          path: ./.github/GuruCICDCanary-Prod/CICD-Actions
+
+      - name: AWS CodeGuru Reviewer Scanner
+        uses: ./.github/GuruCICDCanary-Prod/CICD-Actions
+        if: ${{ always() }}
+        with:
+          name: cicd-canary-prod-ap-northeast-1-1781044523110
+          build_path: buildFiles
+          s3_bucket: codeguru-reviewer-github-canary-prod-ap-northeast-1
+
+      - name: Upload review result
+        if: ${{ always() }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: codeguru-results.sarif.json
+
+      # Add this step to assist debugging
+      - name: 'Upload Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarif_results
+          path: codeguru-results*.json
